@@ -7,65 +7,82 @@ var fs = require('fs')
   , querystring = require('querystring')
   , uuid = require('node-uuid')
   , slurp = require('slurp-stream')
-  // Path to write the file to.
-  , PATH_PREFIX = '/nfs/data1/SERVICES/classifier/text_'
-  // URL of the web service -- this should be internal!
-  , REMOTE_URL = 'http://abrolhos.nis.ualberta.ca:8080/simpleweka/rest/defaultmodel'
+  , async = require('async')
   ;
 
-exports.classifier = function (req, res, next) {
-  var content
-    , id
-    , filename
-    , getParams
-    , serviceURL
-    ;
+// Path to write the file to.
+var PATH_PREFIX = '/nfs/data1/SERVICES/classifier/text_'
+  // URL of the web service -- this should be a secret!
+  , REMOTE_URL = 'http://localhost:3000'
+  ;
 
-  if (req.body && req.body.content) {
+/**
+ * Given some content, contacts the webservce. Calls the `done(err, data)`
+ * callback when the result was obtained, or an error was encountered along the
+ * way.
+ */
+function doClassify(content, done) {
+  var filename;
 
-    // Got the content param! Now write it to the disk, send a request, and send things
-    // back.
+  // Create a new unique name for the file.
+  filename = PATH_PREFIX + uuid.v1();
 
-    content = req.params.content;
+  // [`async.waterfall`][waterfall] will run a bunch of asynchronous routines in a sequence,
+  // feeding the result of the last into the proceeding routines.
+  //
+  // [waterfall]: https://github.com/caolan/async#waterfalltasks-callback
+  async.waterfall([
 
-    // Create a new unique name for the file.
-    id = uuid.v1();
-    filename = PATH_PREFIX + id;
+    // Write content to the shared disk.
+    function (done) {
+      fs.writeFile(filename, content, done);
+    },
+    
+    // Now make a GET request to the *real* service.
+    function (done) {
+      var getParams
+        , serviceURL;
 
-    // Write the file, then make the request.
-    fs.writeFile(filename, content, function (err) {
-
-      // Make the appropriate query string.
+      // Construct the appropriate query string...
       getParams = querystring.stringify({
         filename: filename
       });
 
-      // Construct the URL.
+      // ... and the full URL.
       serviceURL = REMOTE_URL + '?' + getParams;
 
       // Make the GET request.
-      http.get(serviceURL, function (serviceReply) {
+      // Note that this callback is irregular! Must make it nest a little bit...
+      http.get(serviceURL, function (message) {
 
-        // Make sure the status code is ok.
-        if (serviceReply.statusCode !== 200) {
-          throw new Error('Failed invoking service.');
+        // Slurp the contents of the server's response,
+        // as long as the result was successful.
+        if (message.statusCode !== 200) {
+          done(new Error('Failed invoking service.'));
+        } else {
+          slurp(message, done);
         }
-
-        // Now send the response back to the user, verbatim.
-        slurp(serviceReply, function (err, data) {
-          // Boilerplate error "handling".
-          if (err) throw err;
-
-          res.send(data);
-        });
-
-      }).on('error', function (err) {
-        // Let the error handling middleware deal with it, if available.
-        next(err);
       });
+    }
 
+  ], done);
+
+};
+exports.classifier = function (req, res, next) {
+
+  if (req.body && req.body.content) {
+    // Got the content param! Do the classification, doing the following on its
+    // return.
+    doClassify(req.body.content, function (err, data) {
+
+      // Let the error handling middleware deal with the error, if available.
+      if (err) {
+        return next(err);
+      }
+
+      // Send the response back to the user, verbatim.
+      res.send(200, data);
     });
-
 
   } else {
     // Did not send proper parameters.
